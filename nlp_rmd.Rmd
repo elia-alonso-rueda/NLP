@@ -1,0 +1,141 @@
+---
+title: "Natural Language Processing"
+author: "Elia Alonso Rueda"
+date: "30/1/2022"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+subtitle: COVID-RELATED FAKE NEWS CLASSIFICATION
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In order to carry out the fake news classification task through NLP, the data set from the following link was selected: <https://www.kaggle.com/thesumitbanik/covid-fake-news-dataset>.
+
+First of all, an initial data exploration of the data set will be made in order to make improvements and adjust it for the forward procedure.
+
+### 0. Library loading
+```{r libraries, results='hide',message=FALSE, warning=FALSE}
+library(dplyr) 
+library(utf8) 
+library(textstem) 
+library(tm)
+library(stringr) 
+library(quanteda) 
+library(quanteda.textstats) # ML models
+library(quanteda.textmodels) # ML models
+library(caret) # matrix treatment
+library(RColorBrewer) # colors for plots
+library(wordcloud) #wordclous
+```
+
+### 1. First Data Exploration and Pre-Processing
+```{r first data exploration}
+setwd("C:/Users/Elia/Desktop/master/INTELLIGENT SYSTEMS/NLP")
+original_data <- read.csv("data.csv")
+names(original_data) <- c("social", "label")
+#turn 0 and 1 into "fake" and "true" labels
+original_data$label[original_data$label == 0] <- "fake"
+original_data$label[original_data$label == 1] <- "true"
+#see wether the data set is balanced or not
+print(table(original_data$label))
+```
+The data set is quite unbalanced, which can affect the classification task, so some pre-processing will be made in order to obtain a balanced data set to work with.
+
+```{r pre-processing}
+dif <- sum(original_data$label == "true")/sum(original_data$label == "fake")
+
+t <- original_data[which(original_data$label=="true"),]
+f <- original_data[which(original_data$label=="fake"),]
+
+red <- sample(nrow(f), dif*nrow(f))
+f_red <- f[red,]
+
+data <- rbind(t,f_red)
+print(table(data$label))
+```
+Much better. Now, let's make some basic checks.
+
+```{r basic checks}
+#Identifying missing values
+#Number of missing values: 
+which(is.na(data))
+#Checking the encoding
+#Number of incorrectly encoded characters: 
+enc_social <- sum(data[!utf8_valid(data$social)])
+print(enc_social)
+#Checking character normalization
+#Number of characters different from normalized composed form:
+NFC_social <- utf8_normalize(data$social)
+norm_social <- sum(NFC_social != data$social)
+print(norm_social)
+```
+All the values are 0, which indicates that everything is correct. However, some non-alphanumeric characters were observed in the social media statements, which could not be solved other way than as follows:
+```{r removing non-alphanumeric characters}
+for (i in (1:nrow(data))){
+  data$social[i] <- as.String(data$social[i])
+  data$social[i] <- str_replace_all(data$social[i], "[^a-zA-Z0-9]", " ")
+  data$social[i] <- as.character(data$social[i])
+  data$social[i] <- lemmatize_strings(data$social[i])
+}
+```
+Note that, to make use of the loop besides removing non-alphanumeric characters, text was also lemmatized in order to simplify it. Thus, once the data set is ready, it is time for corpus and transformations.
+
+### 2. Data cleaning. Corpus and transformations.
+```{r corpus and transformations, message=FALSE, warning=FALSE}
+vs <- VectorSource(data$social)
+corp <- VCorpus(vs)
+inspect(corp[[1]])#Example of a social statemente before cleaning
+tr_corpus <- tm_map(corp,removeNumbers)
+tr_corpus <- tm_map(tr_corpus,removePunctuation)
+tr_corpus <- tm_map(tr_corpus,removeWords, stopwords())
+tr_corpus <- tm_map(tr_corpus,stripWhitespace)
+tr_corpus <- tm_map(tr_corpus,content_transformer(tolower))
+tr_corpus <- tm_map(tr_corpus, stemDocument)
+inspect(tr_corpus[[1]])#And after cleaning
+corpus_quanteda <- corpus(tr_corpus)
+corpus_quanteda$label <- data$label
+dfmat <-dfm(tokens(corpus_quanteda))
+```
+### 3. Clean data visualization.
+```{r clean data visualization, message=FALSE, warning=FALSE}
+tdm <- TermDocumentMatrix(tr_corpus)
+freq=rowSums(as.matrix(tdm))
+pal=brewer.pal(8,"Blues")
+pal=pal[-(1:3)]
+set.seed(1234)
+word.cloud=wordcloud(words=names(freq), freq=freq,
+                     min.freq=400, random.order=F, colors=pal)
+```
+
+### 4. Training and Test subsets split.
+```{r train test split}
+#sample in order to avoid overfitting
+id_train <- sample(ndoc(dfmat),0.75*ndoc(dfmat))
+# get training set
+dfmat_training <- dfm_subset(dfmat, id %in% id_train)
+# get test set (documents not in id_train)
+dfmat_test <- dfm_subset(dfmat, !id %in% id_train)
+```
+### 5. Classification - Naive Bayes Model
+```{r nb}
+tmod_nb <- textmodel_nb(dfmat_training, dfmat_training$label, distribution = "multinomial")
+summary(tmod_nb)
+```
+Above, we can see the estimated feature scores given by the model, from which some observations can be made related to the most frequent words in both true and false statements related to COVID.
+
+```{r model analysis}
+dfmat_matched <- dfm_match(dfmat_test, features = featnames(dfmat_training))
+
+actual_class <- dfmat_matched$label
+predicted_class <- predict(tmod_nb, newdata = dfmat_matched)
+tab_class <- table(actual_class, predicted_class)
+tab_class
+
+confusionMatrix(tab_class, mode = "everything")
+```
+With respect to the model performance, accuracy, sensitivity and precision values over 83% were reached (slight changes can occur due to the sampling in the process). These are good and, therefore, trustworthy results in order to classify social media statements as true or false.
